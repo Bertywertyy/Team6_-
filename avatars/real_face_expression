@@ -1,0 +1,275 @@
+import cv2 as cv
+import mediapipe as mp
+import os
+import numpy as np
+import insightface
+from insightface.app import FaceAnalysis
+
+# ================= CONFIGURATION =================
+INPUT_FOLDER = "./dataset/test_wlasl"
+OUTPUT_FOLDER = "./dataset/custom_final"
+ASSET_HEAD_FOLDER = "./assets/my_photos"
+MODEL_PATH = "./avatars/inswapper_128.onnx" # Ensure this exists!
+
+# How big the head should be relative to the body
+HEAD_SCALE = 2.0 
+# =================================================
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+class IronManAvatar:
+    def __init__(self):
+        print("🚀 Initializing Stark Industries Systems...")
+        
+        # 1. Setup MediaPipe (The Armor)
+        self.mp_holistic = mp.solutions.holistic
+
+        # 2. Setup InsightFace (The Face/Expressions)
+        self.app = FaceAnalysis(name='buffalo_l')
+        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        
+        if os.path.exists(MODEL_PATH):
+            self.swapper = insightface.model_zoo.get_model(MODEL_PATH, download=False, download_zip=False)
+        else:
+            raise FileNotFoundError(f"❌ Model not found at {MODEL_PATH}. Please download inswapper_128.onnx")
+
+        # 3. Learn YOUR Face (The Source)
+        self.source_face = self.get_best_source_face(ASSET_HEAD_FOLDER)
+
+    def get_best_source_face(self, folder):
+        """ Scans your photos to find the best face embedding for swapping """
+        print(f"🧠 Scanning {folder} for identity...")
+        if not os.path.exists(folder): return None
+        
+        files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.png'))]
+        best_face = None
+        max_det_score = 0
+
+        for f in files:
+            img = cv.imread(os.path.join(folder, f))
+            if img is None: continue
+            faces = self.app.get(img)
+            if not faces: continue
+            
+            # Pick the face with highest detection score (clearest)
+            face = sorted(faces, key=lambda x: x.det_score)[-1]
+            if face.det_score > max_det_score:
+                max_det_score = face.det_score
+                best_face = face
+        
+        if best_face:
+            print(f"✅ Identity Locked. (Quality Score: {max_det_score:.2f})")
+            return best_face
+        else:
+            print("⚠️ No face found in user photos!")
+            return None
+
+    # ================= DRAWING ENGINES =================
+
+    def draw_tech_neck(self, canvas, shoulders, nose, width_px):
+        """ 
+        Draws a mechanical neck to bridge the gap between body and floating head.
+        """
+        h, w = canvas.shape[:2]
+        
+        # Calculate neck base (between shoulders)
+        sx = int((shoulders[0].x + shoulders[1].x) / 2 * w)
+        sy = int((shoulders[0].y + shoulders[1].y) / 2 * h)
+        
+        # Calculate neck top (chin area - estimated below nose)
+        nx = int(nose.x * w)
+        ny = int(nose.y * h + (width_px * 0.4)) # Offset down from nose
+
+        # Draw Neck Cylinder (Trapezoid)
+        neck_width_top = int(width_px * 0.4)
+        neck_width_bot = int(width_px * 0.6)
+        
+        pts = np.array([
+            [nx - neck_width_top, ny],      # Top Left
+            [nx + neck_width_top, ny],      # Top Right
+            [sx + neck_width_bot, sy],      # Bot Right
+            [sx - neck_width_bot, sy]       # Bot Left
+        ], dtype=np.int32)
+
+        # Draw Neck Segments (Ribbed Suit)
+        cv.fillConvexPoly(canvas, pts, (30, 30, 30)) # Dark Grey Undersuit
+        
+        # Add "Gold Collar" at the bottom
+        cv.line(canvas, (sx - neck_width_bot, sy), (sx + neck_width_bot, sy), (80, 210, 255), 3)
+
+    def process_frame_swap(self, frame):
+        """ Swaps your face onto the frame to capture expressions """
+        faces = self.app.get(frame)
+        if len(faces) == 0: return frame, None
+        
+        target_face = sorted(faces, key=lambda x: x.bbox[2]*x.bbox[3])[-1]
+        
+        # Perform Swap
+        try:
+            res_frame = self.swapper.get(frame, target_face, self.source_face, paste_back=True)
+            return res_frame, target_face # Return the face object for tracking
+        except:
+            return frame, target_face
+
+    def extract_animated_head(self, frame, face_obj, size_px):
+        """ Cuts the newly swapped face out of the frame with a soft mask """
+        if face_obj is None: return None
+        
+        h_img, w_img = frame.shape[:2]
+        bbox = face_obj.bbox
+        cx, cy = (bbox[0]+bbox[2])/2, (bbox[1]+bbox[3])/2
+        
+        # Scale crop area
+        crop_size = int(size_px)
+        x1 = int(cx - crop_size // 2)
+        y1 = int(cy - crop_size // 2)
+        x2 = x1 + crop_size
+        y2 = y1 + crop_size
+        
+        # Pad if out of bounds
+        if x1 < 0 or y1 < 0 or x2 > w_img or y2 > h_img:
+            # Simple safe fallback: just return None or clamp (clamping distorts)
+            # Let's clamp for stability
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w_img, x2), min(h_img, y2)
+        
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0: return None
+        
+        # Resize to standard size for masking
+        target_s = 300
+        try: crop = cv.resize(crop, (target_s, target_s))
+        except: return None
+        
+        # Create Circular Mask
+        mask = np.zeros((target_s, target_s), dtype=np.uint8)
+        cv.circle(mask, (target_s//2, target_s//2), int(target_s*0.45), 255, -1)
+        mask = cv.GaussianBlur(mask, (25, 25), 0) # Soft edges
+        
+        # Merge
+        b,g,r = cv.split(crop)
+        return cv.merge([b,g,r,mask])
+
+    def overlay_head(self, canvas, head_img, center_x, center_y):
+        """ Pastes the extracted head onto the canvas """
+        if head_img is None: return
+        h_c, w_c = canvas.shape[:2]
+        h_h, w_h = head_img.shape[:2]
+        
+        x1 = center_x - w_h // 2
+        y1 = center_y - h_h // 2
+        x2 = x1 + w_h
+        y2 = y1 + h_h
+        
+        # Bounds check
+        if x1 < 0: x1 = 0
+        if y1 < 0: y1 = 0
+        if x2 > w_c: x2 = w_c
+        if y2 > h_c: y2 = h_c
+        
+        # Recalculate dimensions
+        w_final = x2 - x1
+        h_final = y2 - y1
+        if w_final <= 0 or h_final <= 0: return
+        
+        overlay_crop = head_img[:h_final, :w_final]
+        
+        alpha = overlay_crop[:, :, 3] / 255.0
+        inv_alpha = 1.0 - alpha
+        
+        for c in range(3):
+            canvas[y1:y2, x1:x2, c] = (alpha * overlay_crop[:, :, c] + 
+                                       inv_alpha * canvas[y1:y2, x1:x2, c])
+
+    def draw_armor(self, canvas, lm, w, h):
+        """ Draws the Iron Man Suit (Simplified for brevity) """
+        # Colors
+        GOLD = (80, 210, 255)
+        RED = (20, 20, 180)
+        BLUE = (255, 200, 0)
+        
+        # Shoulders
+        s_l = (int(lm[11].x*w), int(lm[11].y*h))
+        s_r = (int(lm[12].x*w), int(lm[12].y*h))
+        h_l = (int(lm[23].x*w), int(lm[23].y*h))
+        h_r = (int(lm[24].x*w), int(lm[24].y*h))
+        
+        shoulder_width = np.linalg.norm(np.array(s_l) - np.array(s_r))
+        
+        # 1. DRAW NECK (The Gap Fixer)
+        self.draw_tech_neck(canvas, [lm[11], lm[12]], lm[0], shoulder_width)
+        
+        # 2. DRAW TORSO
+        pts = np.array([s_l, s_r, h_r, h_l])
+        cv.fillConvexPoly(canvas, pts, RED)
+        cv.line(canvas, s_l, h_r, GOLD, 5) # Cross details
+        cv.line(canvas, s_r, h_l, GOLD, 5)
+        
+        # 3. DRAW REACTOR
+        cx, cy = int((s_l[0]+s_r[0])/2), int((s_l[1]+s_r[1] + (h_l[1]+h_r[1])*0.5)/2)
+        cv.circle(canvas, (cx, cy), int(shoulder_width*0.15), BLUE, -1)
+        cv.circle(canvas, (cx, cy), int(shoulder_width*0.05), (255, 255, 255), -1)
+        
+        return shoulder_width # Return width to scale head
+
+    # ================= MAIN LOOP =================
+    
+    def process_video(self, input_path, output_path):
+        cap = cv.VideoCapture(input_path)
+        w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+        out = cv.VideoWriter(output_path, cv.VideoWriter_fourcc(*'mp4v'), 30, (w, h))
+
+        # Background Grid
+        bg_grid = np.full((h, w, 3), (15, 15, 15), dtype=np.uint8)
+        for i in range(0, w, 40): cv.line(bg_grid, (i, 0), (i, h), (30, 30, 30), 1)
+
+        with self.mp_holistic.Holistic(min_detection_confidence=0.5) as holistic:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: break
+                
+                # A. Run MediaPipe (Get Body Coordinates)
+                frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+                results = holistic.process(frame_rgb)
+                
+                # B. Run Face Swap (Get Expressions)
+                swapped_frame, face_obj = self.process_frame_swap(frame)
+                
+                # C. Render Canvas
+                canvas = bg_grid.copy()
+                
+                if results.pose_landmarks:
+                    lm = results.pose_landmarks.landmark
+                    
+                    # 1. Draw Body & Neck
+                    s_width = self.draw_armor(canvas, lm, w, h)
+                    
+                    # 2. Extract & Paste Head
+                    # We grab the head from the SWAPPED frame, so it has YOUR face + Video's Expression
+                    if face_obj:
+                        # Scale head based on shoulder width
+                        head_size_px = s_width * HEAD_SCALE 
+                        animated_head = self.extract_animated_head(swapped_frame, face_obj, head_size_px)
+                        
+                        # Position head at Nose landmark
+                        nose_x = int(lm[0].x * w)
+                        nose_y = int(lm[0].y * h)
+                        
+                        self.overlay_head(canvas, animated_head, nose_x, nose_y)
+
+                out.write(canvas)
+                
+        cap.release()
+        out.release()
+        print(f"✅ Rendered: {output_path}")
+
+    def run(self):
+        files = [f for f in os.listdir(INPUT_FOLDER) if f.endswith(".mp4")]
+        print(f"🎬 Processing {len(files)} videos...")
+        for f in files:
+            self.process_video(os.path.join(INPUT_FOLDER, f), os.path.join(OUTPUT_FOLDER, f))
+
+if __name__ == "__main__":
+    bot = IronManAvatar()
+    bot.run()
