@@ -1,0 +1,11 @@
+PyQt6
+opencv-python
+numpy
+mediapipe
+requests
+pyttsx3
+pyqtdarktheme
+moviepy
+SpeechRecognition
+pyaudio
+spacy
