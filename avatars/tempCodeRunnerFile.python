@@ -1,0 +1,437 @@
+import cv2 as cv
+import mediapipe as mp
+import os
+import numpy as np
+import insightface
+from insightface.app import FaceAnalysis
+
+# ================= CONFIGURATION =================
+INPUT_FOLDER = "./dataset/test_wlasl"
+OUTPUT_FOLDER = "./dataset/custom"
+ASSET_HEAD_FOLDER = "./assets/my_photos" 
+HAT_PNG_PATH = "./assets/hat.png" 
+MODEL_PATH = "./avatars/inswapper_128.onnx"
+
+HEAD_SIZE_MULTIPLIER = 1.23
+TARGET_WIDTH = 1920
+TARGET_HEIGHT = 1080
+
+# HAT SETTING
+HAT_LIFT_MULTIPLIER = 1.1 
+
+# FACE POSITION: Reduced from 0.04 to 0.015 to LIFT the face up slightly
+FACE_PUSH_DOWN_AMOUNT = 0.015 
+
+# =================================================
+
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+class IronManLiveAvatar:
+    def __init__(self):
+        print("🚀 Initializing Stark Industries Systems (V13 - Lifted Face)...")
+        self.mp_holistic = mp.solutions.holistic
+        
+        print("   - Loading AI Models...")
+        self.app = FaceAnalysis(name='buffalo_l')
+        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        
+        if os.path.exists(MODEL_PATH):
+            self.swapper = insightface.model_zoo.get_model(MODEL_PATH, download=False, download_zip=False)
+        else:
+            raise FileNotFoundError(f"❌ Model missing: {MODEL_PATH}")
+
+        self.source_face = self.get_best_source_face(ASSET_HEAD_FOLDER)
+        if self.source_face is None:
+            raise ValueError("❌ No valid face found in 'my_photos'.")
+
+        if os.path.exists(HAT_PNG_PATH):
+            self.hat_img = cv.imread(HAT_PNG_PATH, cv.IMREAD_UNCHANGED)
+            print("   - ✅ Hat Asset Loaded.")
+        else:
+            print("   - ⚠️ WARNING: 'hat.png' not found.")
+            self.hat_img = None
+
+    def get_best_source_face(self, folder):
+        print(f"🧠 Scanning {folder} for identity...")
+        if not os.path.exists(folder): return None
+        files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.png'))]
+        best_face = None
+        max_score = 0
+        for f in files:
+            img = cv.imread(os.path.join(folder, f))
+            if img is None: continue
+            faces = self.app.get(img)
+            if not faces: continue
+            face = sorted(faces, key=lambda x: x.det_score)[-1]
+            if face.det_score > max_score:
+                max_score = face.det_score
+                best_face = face
+        if best_face: print(f"✅ Identity Locked. (Confidence: {max_score:.2f})")
+        return best_face
+
+    # ================= 🛠️ NORMALIZATION =================
+
+    def fit_to_standard_resolution(self, img):
+        h, w = img.shape[:2]
+        scale_w = TARGET_WIDTH / w
+        scale_h = TARGET_HEIGHT / h
+        scale = min(scale_w, scale_h) 
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        resized = cv.resize(img, (new_w, new_h), interpolation=cv.INTER_AREA)
+        canvas = np.full((TARGET_HEIGHT, TARGET_WIDTH, 3), 0, dtype=np.uint8)
+        x_off = (TARGET_WIDTH - new_w) // 2
+        y_off = (TARGET_HEIGHT - new_h) // 2
+        canvas[y_off:y_off+new_h, x_off:x_off+new_w] = resized
+        return canvas
+
+    # ================= 🎨 VISUAL ENGINES =================
+
+    def make_face_natural_hd(self, img):
+        if img is None or img.size == 0: return img
+        h, w = img.shape[:2]
+        img = cv.resize(img, (int(w*1.5), int(h*1.5)), interpolation=cv.INTER_LANCZOS4)
+        gaussian = cv.GaussianBlur(img, (0, 0), 2.0)
+        sharpened = cv.addWeighted(img, 1.4, gaussian, -0.4, 0)
+        sharpened = cv.convertScaleAbs(sharpened, alpha=1.05, beta=0)
+        return sharpened
+
+    def draw_glow_circle(self, img, center, radius, color, strength=3):
+        overlay = img.copy()
+        for i in range(1, strength + 1):
+            alpha = 0.4 / i
+            r = int(radius + (i * radius * 0.3))
+            cv.circle(overlay, center, r, color, -1)
+            cv.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+        cv.circle(img, center, int(radius*0.8), (255, 255, 255), -1)
+
+    def draw_layered_plate(self, canvas, pts, base_color, high_color, trim_color):
+        cv.fillConvexPoly(canvas, pts, base_color)
+        center = np.mean(pts, axis=0, dtype=np.int32)
+        shrunk = []
+        for pt in pts:
+            vec = center - pt
+            shrunk.append(pt + (vec * 0.15).astype(np.int32))
+        cv.fillConvexPoly(canvas, np.array(shrunk, np.int32), high_color)
+        cv.polylines(canvas, [pts], True, trim_color, 3, cv.LINE_AA)
+
+    def draw_panel_lines(self, canvas, pts, color, thickness=1):
+        if len(pts) < 4: return
+        mid1 = (pts[0] + pts[1]) // 2
+        mid2 = (pts[2] + pts[3]) // 2
+        cv.line(canvas, tuple(mid1), tuple(mid2), color, thickness, cv.LINE_AA)
+
+    def draw_complex_neck(self, canvas, shoulders, chin, width_px):
+        h, w = canvas.shape[:2]
+        sx = int((shoulders[0].x + shoulders[1].x) / 2 * w)
+        sy = int((shoulders[0].y + shoulders[1].y) / 2 * h)
+        cx = int(chin.x * w)
+        cy = int(chin.y * h)
+        
+        # Apply Push Down (Reduced amount to lift face)
+        cy += int(h * FACE_PUSH_DOWN_AMOUNT) 
+        
+        neck_w = int(width_px * 0.45) 
+        collar_w = int(width_px * 0.65)
+        
+        tube_pts = np.array([[cx - int(neck_w*0.5), cy], [cx + int(neck_w*0.5), cy], [sx + int(neck_w*0.6), sy], [sx - int(neck_w*0.6), sy]], dtype=np.int32)
+        cv.fillConvexPoly(canvas, tube_pts, (30, 30, 30))
+        
+        for i in [-0.25, 0, 0.25]:
+            offset_top = int(neck_w * i)
+            offset_bot = int(neck_w * i * 1.3)
+            cv.line(canvas, (cx + offset_top, cy), (sx + offset_bot, sy), (70, 70, 70), 4, cv.LINE_AA)
+
+        collar_pts = np.array([[sx - int(collar_w*0.5), sy], [sx + int(collar_w*0.5), sy], [sx + int(collar_w*0.4), sy + int(width_px*0.18)], [sx - int(collar_w*0.4), sy + int(width_px*0.18)]], dtype=np.int32)
+        self.draw_layered_plate(canvas, collar_pts, (60, 180, 235), (100, 220, 255), (80, 210, 255))
+
+    def draw_mark85_armor(self, canvas, landmarks, w, h, s_width):
+        lm = landmarks.landmark
+        C_RED_DARK, C_RED_LITE = (30, 30, 160), (60, 60, 230)
+        C_GOLD_DARK, C_GOLD_LITE = (60, 180, 235), (120, 230, 255)
+        C_TRIM = (100, 220, 255) 
+        C_PANEL = (20, 20, 100) 
+
+        s_l = np.array([lm[11].x*w, lm[11].y*h], dtype=np.int32)
+        s_r = np.array([lm[12].x*w, lm[12].y*h], dtype=np.int32)
+        
+        mid_x = (s_l[0] + s_r[0]) // 2
+        mid_y = (s_l[1] + s_r[1]) // 2
+        torso_len = int(s_width * 1.7)
+        waist_width = int(s_width * 0.60) 
+        
+        h_l = np.array([mid_x + waist_width, mid_y + torso_len], dtype=np.int32)
+        h_r = np.array([mid_x - waist_width, mid_y + torso_len], dtype=np.int32)
+
+        trap_h = int(s_width * 0.35)
+        neck_pt = np.array([mid_x, mid_y - int(s_width*0.1)], dtype=np.int32)
+        traps = np.array([s_l, [mid_x - int(s_width*0.3), mid_y - trap_h], [mid_x + int(s_width*0.3), mid_y - trap_h], s_r, neck_pt], dtype=np.int32)
+        self.draw_layered_plate(canvas, traps, C_GOLD_DARK, C_GOLD_LITE, C_TRIM)
+
+        cb_h = int(s_width * 0.15)
+        cb_l_pts = np.array([s_l, [mid_x, mid_y + cb_h], [mid_x - int(s_width*0.2), mid_y + cb_h + 20], [s_l[0]-20, s_l[1]+cb_h]], dtype=np.int32)
+        cb_r_pts = np.array([s_r, [mid_x, mid_y + cb_h], [mid_x + int(s_width*0.2), mid_y + cb_h + 20], [s_r[0]+20, s_r[1]+cb_h]], dtype=np.int32)
+        self.draw_layered_plate(canvas, cb_l_pts, C_RED_DARK, C_RED_LITE, C_TRIM)
+        self.draw_layered_plate(canvas, cb_r_pts, C_RED_DARK, C_RED_LITE, C_TRIM)
+
+        chest_top_y = mid_y + cb_h
+        chest_bot_y = int(mid_y + s_width * 0.85)
+        chest = np.array([[s_l[0]+30, chest_top_y], [s_r[0]-30, chest_top_y], [int(mid_x - waist_width*0.9), chest_bot_y], [mid_x, chest_bot_y + int(s_width*0.25)], [int(mid_x + waist_width*0.9), chest_bot_y]], dtype=np.int32)
+        self.draw_layered_plate(canvas, chest, C_RED_DARK, C_RED_LITE, C_TRIM)
+        self.draw_panel_lines(canvas, chest, C_PANEL, 2) 
+
+        abs_pts = np.array([[int(mid_x - waist_width*0.7), chest_bot_y], [int(mid_x + waist_width*0.7), chest_bot_y], [h_l[0]-30, h_l[1]], [h_r[0]+30, h_r[1]]], dtype=np.int32)
+        self.draw_layered_plate(canvas, abs_pts, C_RED_DARK, C_RED_LITE, C_TRIM)
+        self.draw_panel_lines(canvas, abs_pts, C_PANEL, 2)
+
+        rib_w = int(s_width*0.15)
+        rib_l = np.array([[int(mid_x - waist_width*0.7), chest_bot_y+20], [int(mid_x - waist_width*0.9)-rib_w, chest_bot_y+50], [h_r[0]-rib_w, h_r[1]-50], [h_r[0]+20, h_r[1]-20]], dtype=np.int32)
+        rib_r = np.array([[int(mid_x + waist_width*0.7), chest_bot_y+20], [int(mid_x + waist_width*0.9)+rib_w, chest_bot_y+50], [h_l[0]+rib_w, h_l[1]-50], [h_l[0]-20, h_l[1]-20]], dtype=np.int32)
+        self.draw_layered_plate(canvas, rib_l, C_GOLD_DARK, C_GOLD_LITE, C_TRIM)
+        self.draw_layered_plate(canvas, rib_r, C_GOLD_DARK, C_GOLD_LITE, C_TRIM)
+
+        rad = int(s_width * 0.28)
+        cv.circle(canvas, s_l, rad, C_RED_DARK, -1)
+        cv.circle(canvas, s_l, int(rad*0.85), C_RED_LITE, -1)
+        cv.circle(canvas, s_l, int(rad*0.85), C_TRIM, 4)
+        cv.circle(canvas, s_r, rad, C_RED_DARK, -1)
+        cv.circle(canvas, s_r, int(rad*0.85), C_RED_LITE, -1)
+        cv.circle(canvas, s_r, int(rad*0.85), C_TRIM, 4)
+
+        rx, ry = mid_x, int(mid_y + s_width * 0.3)
+        cv.circle(canvas, (rx, ry), int(s_width*0.18), C_TRIM, 3)
+        self.draw_glow_circle(canvas, (rx, ry), int(s_width*0.14), (255, 240, 150), strength=6)
+
+        self.draw_arm_segment(canvas, lm[11], lm[13], w, h, s_width*0.42, C_GOLD_LITE)
+        self.draw_arm_segment(canvas, lm[12], lm[14], w, h, s_width*0.42, C_GOLD_LITE)
+        self.draw_arm_segment(canvas, lm[13], lm[15], w, h, s_width*0.38, C_RED_LITE)
+        self.draw_arm_segment(canvas, lm[14], lm[16], w, h, s_width*0.38, C_RED_LITE)
+
+    def draw_arm_segment(self, canvas, p1, p2, w, h, thick, color):
+        x1, y1 = int(p1.x * w), int(p1.y * h)
+        x2, y2 = int(p2.x * w), int(p2.y * h)
+        if x1==0 or x2==0: return
+        dx, dy = x2-x1, y2-y1
+        L = np.sqrt(dx**2 + dy**2)
+        if L == 0: return
+        nx, ny = -dy/L, dx/L
+        mid_x, mid_y = (x1+x2)//2, (y1+y2)//2
+        pts = np.array([
+            [x1 + nx*thick*0.5, y1 + ny*thick*0.5],
+            [mid_x + nx*thick*0.55, mid_y + ny*thick*0.55], 
+            [x2 + nx*thick*0.35, y2 + ny*thick*0.35], 
+            [x2 - nx*thick*0.35, y2 - ny*thick*0.35], 
+            [mid_x - nx*thick*0.55, mid_y - ny*thick*0.55], 
+            [x1 - nx*thick*0.5, y1 - ny*thick*0.5]
+        ], dtype=np.int32)
+        cv.fillConvexPoly(canvas, pts, color)
+        cv.polylines(canvas, [pts], True, (80, 210, 255), 2, cv.LINE_AA)
+
+    # ================= 🧠 FACE & HAT ENGINES =================
+
+    def get_contoured_face_crop(self, frame, face_obj, landmarks):
+        try: swapped = self.swapper.get(frame, face_obj, self.source_face, paste_back=True)
+        except: swapped = frame
+        swapped = self.make_face_natural_hd(swapped)
+        h, w = frame.shape[:2]
+        h_s, w_s = swapped.shape[:2]
+        scale_x, scale_y = w_s / w, h_s / h 
+        silhouette_ids = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+        poly_points = []
+        for idx in silhouette_ids:
+            lm = landmarks.landmark[idx]
+            px = int(lm.x * w * scale_x)
+            py = int(lm.y * h * scale_y)
+            poly_points.append([px, py])
+        if not poly_points: return None
+        pts = np.array(poly_points, dtype=np.int32)
+        M = cv.moments(pts)
+        if M['m00'] != 0:
+            cx = int(M['m10']/M['m00'])
+            cy = int(M['m01']/M['m00'])
+            expanded_pts = []
+            for p in pts:
+                vec = p - [cx, cy]
+                p_new = [cx, cy] + vec * [1.25, 1.20] 
+                expanded_pts.append(p_new)
+            pts = np.array(expanded_pts, dtype=np.int32)
+        x, y, cw, ch = cv.boundingRect(pts)
+        pad = 80
+        x = max(0, x - pad)
+        y = max(0, y - pad)
+        cw = min(w_s - x, cw + 2*pad)
+        ch = min(h_s - y, ch + 2*pad)
+        face_crop = swapped[y:y+ch, x:x+cw]
+        mask = np.zeros((ch, cw), dtype=np.uint8)
+        pts_shifted = pts - [x, y]
+        cv.fillConvexPoly(mask, pts_shifted, 255)
+        mask = cv.GaussianBlur(mask, (15, 15), 0)
+        b, g, r = cv.split(face_crop)
+        return cv.merge([b, g, r, mask])
+
+    def overlay_hat(self, canvas, center_pt, face_width, w, h):
+        if self.hat_img is None: return
+        h_c, w_c = canvas.shape[:2]
+        hat_scale = face_width * 0.95
+        h_src, w_src = self.hat_img.shape[:2]
+        aspect = h_src / w_src
+        new_w = int(hat_scale)
+        new_h = int(new_w * aspect)
+        try: hat_resized = cv.resize(self.hat_img, (new_w, new_h))
+        except: return
+        x = int(center_pt.x * w)
+        y = int(center_pt.y * h)
+        
+        # Apply Push Down
+        y += int(h * FACE_PUSH_DOWN_AMOUNT)
+        y_offset = int(new_h * HAT_LIFT_MULTIPLIER) 
+        x1 = x - new_w // 2
+        y1 = y - y_offset
+        x2 = x1 + new_w
+        y2 = y1 + new_h
+        x1_c, y1_c = max(0, x1), max(0, y1)
+        x2_c, y2_c = min(w_c, x2), min(h_c, y2)
+        ox1, oy1 = x1_c - x1, y1_c - y1
+        ox2, oy2 = new_w - (x2 - x2_c), new_h - (y2 - y2_c)
+        if x2_c <= x1_c or y2_c <= y1_c: return
+        crop = hat_resized[oy1:oy2, ox1:ox2]
+        if crop.shape[2] == 4:
+            alpha = crop[:, :, 3] / 255.0
+            inv_alpha = 1.0 - alpha
+            for c in range(3):
+                canvas[y1_c:y2_c, x1_c:x2_c, c] = (alpha * crop[:, :, c] + inv_alpha * canvas[y1_c:y2_c, x1_c:x2_c, c])
+
+    def overlay_head(self, canvas, head_img, center_pt, w, h):
+        if head_img is None: return
+        h_c, w_c = canvas.shape[:2]
+        h_h, w_h = head_img.shape[:2]
+        x = int(center_pt.x * w)
+        y = int(center_pt.y * h)
+        
+        # PUSH FACE LOWER
+        y += int(h * FACE_PUSH_DOWN_AMOUNT) 
+        
+        x1 = x - w_h // 2
+        y1 = y - h_h // 2
+        x2 = x1 + w_h
+        y2 = y1 + h_h
+        x1_c, y1_c = max(0, x1), max(0, y1)
+        x2_c, y2_c = min(w_c, x2), min(h_c, y2)
+        ox1, oy1 = x1_c - x1, y1_c - y1
+        ox2, oy2 = w_h - (x2 - x2_c), h_h - (y2 - y2_c)
+        if x2_c <= x1_c or y2_c <= y1_c: return
+        crop = head_img[oy1:oy2, ox1:ox2]
+        alpha = crop[:, :, 3] / 255.0
+        inv_alpha = 1.0 - alpha
+        for c in range(3):
+            canvas[y1_c:y2_c, x1_c:x2_c, c] = (alpha * crop[:, :, c] + inv_alpha * canvas[y1_c:y2_c, x1_c:x2_c, c])
+
+    def draw_hands_armored(self, canvas, landmarks, base_color, joint_color):
+        """ Draws thick armored segments and joints instead of stick figures """
+        lm = landmarks.landmark
+        h, w = canvas.shape[:2]
+        
+        thumb = [1, 2, 3, 4]
+        index = [5, 6, 7, 8]
+        middle = [9, 10, 11, 12]
+        ring = [13, 14, 15, 16]
+        pinky = [17, 18, 19, 20]
+        palm = [0, 1, 5, 9, 13, 17, 0]
+
+        thickness = 8
+        for finger in [thumb, index, middle, ring, pinky]:
+            for i in range(len(finger) - 1):
+                p1 = (int(lm[finger[i]].x * w), int(lm[finger[i]].y * h))
+                p2 = (int(lm[finger[i+1]].x * w), int(lm[finger[i+1]].y * h))
+                cv.line(canvas, p1, p2, base_color, thickness)
+        
+        for i in range(len(palm) - 1):
+             p1 = (int(lm[palm[i]].x * w), int(lm[palm[i]].y * h))
+             p2 = (int(lm[palm[i+1]].x * w), int(lm[palm[i+1]].y * h))
+             cv.line(canvas, p1, p2, base_color, thickness+2)
+
+        joint_radius = 6
+        for i in range(21):
+            cx, cy = int(lm[i].x * w), int(lm[i].y * h)
+            cv.circle(canvas, (cx, cy), joint_radius, joint_color, -1)
+            cv.circle(canvas, (cx, cy), joint_radius, (80, 210, 255), 1)
+
+    def process_video(self, input_path, output_path):
+        cap = cv.VideoCapture(input_path)
+        out = cv.VideoWriter(output_path, cv.VideoWriter_fourcc(*'mp4v'), 30, (TARGET_WIDTH, TARGET_HEIGHT))
+        ZOOM = 0.72
+
+        with self.mp_holistic.Holistic(min_detection_confidence=0.5, refine_face_landmarks=True) as holistic:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: break
+                
+                canvas = self.fit_to_standard_resolution(frame)
+                faces = self.app.get(canvas) 
+                results = holistic.process(cv.cvtColor(canvas, cv.COLOR_BGR2RGB)) 
+                
+                final_comp = np.full((TARGET_HEIGHT, TARGET_WIDTH, 3), (15, 15, 15), dtype=np.uint8)
+                for x in range(0, TARGET_WIDTH, 60): cv.line(final_comp, (x, 0), (x, TARGET_HEIGHT), (30, 30, 30), 1)
+                for y in range(0, TARGET_HEIGHT, 60): cv.line(final_comp, (0, y), (TARGET_WIDTH, y), (30, 30, 30), 1)
+
+                nose_anchor = results.pose_landmarks.landmark[0] if results.pose_landmarks else None
+                def do_zoom(lms):
+                    if not lms or not nose_anchor: return
+                    for pt in lms.landmark:
+                        pt.x = nose_anchor.x + (pt.x - nose_anchor.x) * ZOOM
+                        pt.y = nose_anchor.y + (pt.y - nose_anchor.y) * ZOOM
+
+                do_zoom(results.pose_landmarks)
+                do_zoom(results.face_landmarks)
+                do_zoom(results.left_hand_landmarks)
+                do_zoom(results.right_hand_landmarks)
+
+                if results.pose_landmarks:
+                    lm = results.pose_landmarks.landmark
+                    shoulder_width = abs(lm[11].x - lm[12].x) * TARGET_WIDTH
+                    chin_pt = results.face_landmarks.landmark[152] if results.face_landmarks else lm[0]
+                    
+                    self.draw_complex_neck(final_comp, [lm[11], lm[12]], chin_pt, shoulder_width)
+                    self.draw_mark85_armor(final_comp, results.pose_landmarks, TARGET_WIDTH, TARGET_HEIGHT, shoulder_width)
+
+                    if len(faces) > 0 and results.face_landmarks:
+                        target_face = sorted(faces, key=lambda x: x.bbox[2]*x.bbox[3])[-1]
+                        head_img = self.get_contoured_face_crop(canvas, target_face, results.face_landmarks)
+                        if head_img is not None:
+                            target_width = int(shoulder_width * HEAD_SIZE_MULTIPLIER)
+                            scale = target_width / head_img.shape[1]
+                            head_img = cv.resize(head_img, (0,0), fx=scale, fy=scale)
+                            
+                            self.overlay_head(final_comp, head_img, lm[0], TARGET_WIDTH, TARGET_HEIGHT)
+                            self.overlay_hat(final_comp, lm[0], target_width, TARGET_WIDTH, TARGET_HEIGHT)
+
+                C_RED_LITE = (60, 60, 230)
+                C_GOLD_LITE = (120, 230, 255)
+
+                if results.left_hand_landmarks:
+                    wrist = results.left_hand_landmarks.landmark[0]
+                    idx = results.left_hand_landmarks.landmark[5]
+                    self.draw_hands_armored(final_comp, results.left_hand_landmarks, C_RED_LITE, C_GOLD_LITE)
+                    self.draw_glow_circle(final_comp, (int((wrist.x+idx.x)/2*TARGET_WIDTH), int((wrist.y+idx.y)/2*TARGET_HEIGHT)), 12, (255, 200, 0), 3)
+
+                if results.right_hand_landmarks:
+                    wrist = results.right_hand_landmarks.landmark[0]
+                    idx = results.right_hand_landmarks.landmark[5]
+                    self.draw_hands_armored(final_comp, results.right_hand_landmarks, C_RED_LITE, C_GOLD_LITE)
+                    self.draw_glow_circle(final_comp, (int((wrist.x+idx.x)/2*TARGET_WIDTH), int((wrist.y+idx.y)/2*TARGET_HEIGHT)), 12, (255, 200, 0), 3)
+
+                out.write(final_comp)
+        cap.release()
+        out.release()
+        print(f"✅ Rendered: {output_path}")
+
+    def run_batch(self):
+        files = [f for f in os.listdir(INPUT_FOLDER) if f.endswith(".mp4")]
+        print(f"🚀 Processing {len(files)} videos...")
+        for i, f in enumerate(files):
+            print(f"[{i+1}/{len(files)}] {f}...")
+            self.process_video(os.path.join(INPUT_FOLDER, f), os.path.join(OUTPUT_FOLDER, f))
+
+if __name__ == "__main__":
+    bot = IronManLiveAvatar()
+    bot.run_batch()
