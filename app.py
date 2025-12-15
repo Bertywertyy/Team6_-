@@ -132,7 +132,7 @@ class PredictionWorker(QThread):
 # ============================================================================
 # 🔊 ROBUST SPEAKER ENGINE (Crash Fix)
 # ============================================================================
-class TTSWorker(QThread):
+class TTSWorker(QThread): #text-to-speech
     """
     Dedicated thread for Text-to-Speech to prevent UI freezes and Crashes.
     Uses a Queue system to process speech requests sequentially.
@@ -201,7 +201,11 @@ class CameraWorker(QThread):
         cap.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
 
         mp_hands = mp.solutions.hands
-        hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+        hands = mp_hands.Hands(
+            max_num_hands=1, 
+            min_detection_confidence=0.7,
+            model_complexity=1  # GPU acceleration enabled
+        )
         keypoint_classifier = KeyPointClassifier()
 
         last_char = ""
@@ -246,13 +250,10 @@ class CameraWorker(QThread):
                     cv.rectangle(debug_image, (20, 440), (20+bar_w, 450), col, -1)
 
                     if duration > HOLD_TIME and not char_processed:
-                        if current_char == TRIGGER_CHAR:
-                            self.finalize_sentence()
-                        else:
-                            # ✅ Insert at Cursor
-                            self.sentence_buffer.insert(self.cursor_pos, current_char)
-                            self.cursor_pos += 1
-                            self.emit_text_update()
+                        # ✅ Insert at Cursor
+                        self.sentence_buffer.insert(self.cursor_pos, current_char)
+                        self.cursor_pos += 1
+                        self.emit_text_update()
                         char_processed = True
                 else:
                     last_char = current_char
@@ -305,7 +306,17 @@ class CameraWorker(QThread):
 
     # --- KEYBOARD CONTROLS (Restored) ---
     def insert_word(self, word):
-        # Insert word + space
+        # Find the start of the current incomplete word before cursor
+        start_pos = self.cursor_pos
+        while start_pos > 0 and self.sentence_buffer[start_pos - 1] not in [" ", "\n"]:
+            start_pos -= 1
+        
+        # Delete the incomplete word
+        while self.cursor_pos > start_pos:
+            self.sentence_buffer.pop(self.cursor_pos - 1)
+            self.cursor_pos -= 1
+        
+        # Insert the completed word + space
         word_chars = list(word) + [" "]
         for c in word_chars:
             self.sentence_buffer.insert(self.cursor_pos, c)
@@ -493,10 +504,16 @@ class UnifiedApp(QMainWindow):
         action_layout = QHBoxLayout()
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self.clear_all)
+        
+        btn_enter = QPushButton("↵ Enter")
+        btn_enter.setStyleSheet("background: #00d9ff; color: #000; font-weight: bold;")
+        btn_enter.clicked.connect(self.manual_enter)
+
         btn_speak = QPushButton("🔊 Speak Again")
         btn_speak.clicked.connect(lambda: self.tts_worker.speak(self.final_display.text()))
         
         action_layout.addWidget(btn_clear)
+        action_layout.addWidget(btn_enter)
         action_layout.addWidget(btn_speak)
         ui_layout.addLayout(action_layout)
 
@@ -600,6 +617,10 @@ class UnifiedApp(QMainWindow):
             self.tts_worker.speak(text)
         self.trans_input.setText(text) 
 
+    def manual_enter(self):
+        if self.camera_worker:
+            self.camera_worker.finalize_sentence()
+
     def clear_all(self):
         self.buffer_display.setText("")
         self.final_display.setText("...")
@@ -644,7 +665,20 @@ class UnifiedApp(QMainWindow):
                     video_paths.append(video)
                     print(f"✓ Found video for: {word}")
                 else:
-                    print(f"✗ No video for: {word}")
+                    # Try to find similar word
+                    print(f"✗ No video for: {word}, searching for similar...")
+                    similar = loader.find_similar_words(word.lower(), limit=1)
+                    if similar:
+                        similar_word = similar[0]
+                        video = loader.get_video(similar_word)
+                        if video:
+                            final_words.append(f"{similar_word.upper()}*")
+                            video_paths.append(video)
+                            print(f"  ↪ Using similar word: {similar_word}")
+                        else:
+                            print(f"  ✗ Similar word '{similar_word}' has no video")
+                    else:
+                        print(f"  ✗ No similar words found")
             
             # Display the complete AI gloss (what it SHOULD be)
             self.gloss_label.setText(f"Gloss: {' '.join(gloss_words)}\nFound: {', '.join(final_words) if final_words else 'None'}")
@@ -833,6 +867,44 @@ class DatasetLoader:
         if w_underscore in self.word_to_videos:
             return random.choice(self.word_to_videos[w_underscore])
         return None
+    
+    def get_all_words(self):
+        """Returns list of all available words in dataset"""
+        return list(self.word_to_videos.keys())
+    
+    def find_similar_words(self, word, limit=3):
+        """Use AI to find similar words from dataset"""
+        available = self.get_all_words()
+        if not available:
+            return []
+        
+        # Create a sample of words (to avoid huge prompts)
+        word_sample = ', '.join(available[:500])  # First 500 words
+        
+        prompt = (
+            f"From this list of words: [{word_sample}], "
+            f"find the {limit} words with the most SIMILAR MEANING to '{word}'. "
+            f"Focus on semantic similarity (e.g., 'hi' is similar to 'hello', 'bye' is similar to 'goodbye'). "
+            f"Return ONLY a comma-separated list of words from the list. "
+            f"No explanations, no extra text."
+        )
+        
+        try:
+            response = requests.post(LLAMA_URL, json={
+                "model": MODEL_NAME, "prompt": prompt, "stream": False,
+                "options": {"temperature": 0.1}
+            }, timeout=8)
+            
+            if response.status_code == 200:
+                raw = response.json().get('response', '').strip()
+                clean = raw.replace('"', '').replace('[', '').replace(']', '')
+                words = [w.strip().lower() for w in clean.split(',') if w.strip()]
+                # Verify words exist in dataset
+                return [w for w in words if w in self.word_to_videos][:limit]
+        except Exception as e:
+            print(f"⚠️ Similar word search failed: {e}")
+        
+        return []
 
 def main():
     app = QApplication(sys.argv)
