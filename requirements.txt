@@ -1,0 +1,30 @@
+# Core GUI Framework
+PyQt6>=6.4.0
+PyQt6-Multimedia>=6.4.0
+
+# Computer Vision & AI
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+numpy>=1.24.0
+
+# Face Swapping & Deep Learning (for avatar generation)
+insightface>=0.7.3
+onnxruntime>=1.16.0
+
+# Text-to-Speech
+pyttsx3>=2.90
+
+# Speech Recognition
+SpeechRecognition>=3.10.0
+
+# Natural Language Processing
+spacy>=3.7.0
+
+# Video Processing
+moviepy>=1.0.3
+
+# HTTP Requests (for AI model communication)
+requests>=2.31.0
+
+# Additional dependencies that may be needed
+Pillow>=10.0.0

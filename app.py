@@ -16,11 +16,17 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 
+# Try importing pythoncom for Windows TTS stability
+try:
+    import pythoncom
+except ImportError:
+    pythoncom = None
+
 # PyQt6 Imports
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QLabel, QTabWidget, QGroupBox, QSizePolicy, 
-    QCheckBox, QFrame, QProgressBar
+    QCheckBox, QFrame, QProgressBar, QMessageBox
 )
 from PyQt6.QtCore import (
     Qt, QThread, QObject, pyqtSignal, pyqtSlot, QUrl, QTimer
@@ -37,22 +43,28 @@ import qdarktheme
 # ⚙️ GLOBAL CONFIGURATION
 # ============================================================================
 OUTPUT_FOLDER = "./output"
-DATASET_FOLDER = "./dataset"
+DATASET_FOLDER = "./custom"
 LLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "qwen2.5:7b"  
 TRIGGER_CHAR = "Z"
 HOLD_TIME = 0.6
 
 # ============================================================================
-# 🔧 IMPORT & SYNC
+# 🔧 IMPORT & SYNC (SAFEGUARDED - FIX #1)
 # ============================================================================
+# We set a flag so the code knows if the logic module actually loaded
+LOGIC_AVAILABLE = False
 try:
     import logic  
     from utils.cvfpscalc import CvFpsCalc
     from model.keypoint_classifier.keypoint_classifier import KeyPointClassifier
     logic.MODEL_NAME = MODEL_NAME
+    LOGIC_AVAILABLE = True
 except ImportError as e:
-    print(f"❌ Import Error: {e}")
+    print(f"⚠️ Import Warning: {e}. Using fallback mode.")
+    # Create a dummy class so the code doesn't crash if imports fail
+    class KeyPointClassifier:
+        def __call__(self, landmarks): return 0
 
 # ============================================================================
 # 🧠 AI PREDICTION WORKER
@@ -96,22 +108,18 @@ class PredictionWorker(QThread):
                 )
 
             try:
-                print(f"🔮 Predicting for: {text}")
+                # Increased timeout slightly for stability
                 response = requests.post(LLAMA_URL, json={
                     "model": MODEL_NAME, "prompt": prompt, "stream": False, 
                     "options": {"temperature": 0.2} 
-                }, timeout=5)
+                }, timeout=10)
                 
                 if response.status_code == 200:
                     raw = response.json().get('response', '').strip()
-                    print(f"🔮 Raw AI Response: {raw}")
-                    
-                    # Filter out apologies or conversational refusals
                     if "sorry" in raw.lower() or "no words" in raw.lower():
                         self.suggestions_ready.emit([])
                     else:
                         clean = raw.replace('"', '').replace('[', '').replace(']', '').replace('.', '').replace('\n', ',')
-                        
                         if ',' in clean:
                             words = [w.strip() for w in clean.split(',')]
                         else:
@@ -120,23 +128,17 @@ class PredictionWorker(QThread):
                         words = [w for w in words if w and w.lower() != text.lower()]
                         self.suggestions_ready.emit(words[:3])
                 else:
-                    print(f"🔮 AI Error: {response.status_code} - {response.text}")
                     self.suggestions_ready.emit([])
             except Exception as e:
-                print(f"🔮 Prediction Exception: {e}")
                 self.suggestions_ready.emit([])
             
             if self.current_text == text:
                 break
 
 # ============================================================================
-# 🔊 ROBUST SPEAKER ENGINE (Crash Fix)
+# 🔊 ROBUST SPEAKER ENGINE
 # ============================================================================
-class TTSWorker(QThread): #text-to-speech
-    """
-    Dedicated thread for Text-to-Speech to prevent UI freezes and Crashes.
-    Uses a Queue system to process speech requests sequentially.
-    """
+class TTSWorker(QThread):
     def __init__(self):
         super().__init__()
         self.queue = queue.Queue()
@@ -144,27 +146,38 @@ class TTSWorker(QThread): #text-to-speech
         self.start()
 
     def speak(self, text):
-        self.queue.put(text)
+        if text and text.strip():
+            self.queue.put(text)
 
     def run(self):
-        # Initialize engine ONCE inside the thread
-        try:
-            engine = pyttsx3.init()
-            engine.setProperty('rate', 150)
-        except Exception as e:
-            print(f"TTS Init Error: {e}")
-            return
+        # Initialize COM for Windows stability
+        if pythoncom:
+            pythoncom.CoInitialize()
 
         while self.running:
             try:
-                text = self.queue.get() # Blocks until text is available
+                text = self.queue.get() 
                 if text is None: break
                 
-                engine.say(text)
-                engine.runAndWait()
+                print(f"🔊 Speaking: {text}")
+                
+                # Reinitialize engine for each speech to avoid "System Busy" bugs
+                try:
+                    engine = pyttsx3.init()
+                    engine.setProperty('rate', 150)
+                    engine.say(text)
+                    engine.runAndWait()
+                    engine.stop()
+                    del engine
+                except Exception as e:
+                    print(f"TTS Engine Error: {e}")
+                
                 self.queue.task_done()
             except Exception as e:
-                print(f"TTS Error: {e}")
+                print(f"TTS Queue Error: {e}")
+        
+        if pythoncom:
+            pythoncom.CoUninitialize()
 
     def stop(self):
         self.running = False
@@ -172,7 +185,7 @@ class TTSWorker(QThread): #text-to-speech
         self.wait()
 
 # ============================================================================
-# 📸 CAMERA WORKER (With Cursor Logic)
+# 📸 CAMERA WORKER
 # ============================================================================
 class CameraWorker(QThread):
     image_update = pyqtSignal(QImage)
@@ -184,7 +197,7 @@ class CameraWorker(QThread):
         super().__init__()
         self.running = True
         self.sentence_buffer = []
-        self.cursor_pos = 0 # ✅ Tracks where you are typing
+        self.cursor_pos = 0 
         self.labels = []
         self.load_labels()
         
@@ -194,6 +207,9 @@ class CameraWorker(QThread):
             import csv
             with open(path, encoding="utf-8-sig") as f:
                 self.labels = [row[0] for row in csv.reader(f)]
+        else:
+            # Fallback labels if file missing
+            self.labels = ["A", "B", "C"] 
 
     def run(self):
         cap = cv.VideoCapture(0)
@@ -204,7 +220,7 @@ class CameraWorker(QThread):
         hands = mp_hands.Hands(
             max_num_hands=1, 
             min_detection_confidence=0.7,
-            model_complexity=1  # GPU acceleration enabled
+            model_complexity=0  # 0 is faster, 1 is more accurate
         )
         keypoint_classifier = KeyPointClassifier()
 
@@ -223,7 +239,7 @@ class CameraWorker(QThread):
             
             current_char = ""
             if results.multi_hand_landmarks:
-                for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                for hand_landmarks in results.multi_hand_landmarks:
                     brect = self.calc_bounding_rect(debug_image, hand_landmarks)
                     landmarks = self.calc_landmark_list(debug_image, hand_landmarks)
                     pre_processed = self.pre_process_landmark(landmarks)
@@ -233,7 +249,7 @@ class CameraWorker(QThread):
                         current_char = self.labels[idx]
                     
                     # VISUALS
-                    color = (0, 255, 128) # Spring Green
+                    color = (0, 255, 128) 
                     cv.rectangle(debug_image, (brect[0], brect[1]), (brect[2], brect[3]), color, 2)
                     cv.putText(debug_image, current_char, (brect[0], brect[1]-10), 
                              cv.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv.LINE_AA)
@@ -250,7 +266,7 @@ class CameraWorker(QThread):
                     cv.rectangle(debug_image, (20, 440), (20+bar_w, 450), col, -1)
 
                     if duration > HOLD_TIME and not char_processed:
-                        # ✅ Insert at Cursor
+                        # Thread-safe insert
                         self.sentence_buffer.insert(self.cursor_pos, current_char)
                         self.cursor_pos += 1
                         self.emit_text_update()
@@ -266,13 +282,16 @@ class CameraWorker(QThread):
             h, w, ch = debug_image.shape
             bytes_per_line = ch * w
             qt_image = QImage(debug_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            self.image_update.emit(qt_image)
+            
+            # 🛑 CRITICAL FIX #2: Emit a COPY of the image
+            # If we don't copy, Python garbage collects the underlying numpy array
+            # before the UI draws it, causing crashes or flickering.
+            self.image_update.emit(qt_image.copy())
 
         cap.release()
 
     def emit_text_update(self):
         display = list(self.sentence_buffer)
-        # ✅ Show Cursor Visual
         if 0 <= self.cursor_pos <= len(display):
             display.insert(self.cursor_pos, "|")
         self.text_update.emit("".join(display))
@@ -291,9 +310,10 @@ class CameraWorker(QThread):
     def _ai_fix_grammar(self, text):
         prompt = f"Fix the grammar. Output ONLY the corrected sentence. Input: '{text}'"
         try:
+            # Increased timeout for safety
             response = requests.post(LLAMA_URL, json={
                 "model": MODEL_NAME, "prompt": prompt, "stream": False
-            }, timeout=15)
+            }, timeout=30)
             
             if response.status_code == 200:
                 final = response.json().get('response', '').strip().strip('"')
@@ -301,22 +321,20 @@ class CameraWorker(QThread):
                 self.status_update.emit(f"✅ Ready: {final}")
             else:
                 self.sentence_finalized.emit(text)
-        except:
+        except Exception as e:
+            print(f"Grammar AI Error: {e}")
             self.sentence_finalized.emit(text)
 
-    # --- KEYBOARD CONTROLS (Restored) ---
+    # --- KEYBOARD CONTROLS ---
     def insert_word(self, word):
-        # Find the start of the current incomplete word before cursor
         start_pos = self.cursor_pos
         while start_pos > 0 and self.sentence_buffer[start_pos - 1] not in [" ", "\n"]:
             start_pos -= 1
         
-        # Delete the incomplete word
         while self.cursor_pos > start_pos:
             self.sentence_buffer.pop(self.cursor_pos - 1)
             self.cursor_pos -= 1
         
-        # Insert the completed word + space
         word_chars = list(word) + [" "]
         for c in word_chars:
             self.sentence_buffer.insert(self.cursor_pos, c)
@@ -383,7 +401,6 @@ class UnifiedApp(QMainWindow):
         self.setWindowTitle("🚀 AI Sign Language AAC")
         self.setGeometry(100, 100, 1280, 850)
         
-        # ✅ FIX: TTS Worker is now a persistent thread
         self.tts_worker = TTSWorker()
         
         self.camera_worker = None
@@ -447,7 +464,6 @@ class UnifiedApp(QMainWindow):
         
         self.cam_label = QLabel("Camera Off")
         self.cam_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # ✅ FIX: Ignore Size Policy prevents the "Growing UI" bug
         self.cam_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         cam_layout.addWidget(self.cam_label)
         
@@ -505,16 +521,16 @@ class UnifiedApp(QMainWindow):
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self.clear_all)
         
+        btn_speak = QPushButton("🔊 Speak Again")
+        btn_speak.clicked.connect(lambda: self.tts_worker.speak(self.final_display.text()))
+
         btn_enter = QPushButton("↵ Enter")
         btn_enter.setStyleSheet("background: #00d9ff; color: #000; font-weight: bold;")
         btn_enter.clicked.connect(self.manual_enter)
-
-        btn_speak = QPushButton("🔊 Speak Again")
-        btn_speak.clicked.connect(lambda: self.tts_worker.speak(self.final_display.text()))
         
         action_layout.addWidget(btn_clear)
-        action_layout.addWidget(btn_enter)
         action_layout.addWidget(btn_speak)
+        action_layout.addWidget(btn_enter)
         ui_layout.addLayout(action_layout)
 
         layout.addWidget(ui_frame, 40)
@@ -542,7 +558,6 @@ class UnifiedApp(QMainWindow):
         h_layout.addWidget(btn_go)
         layout.addWidget(input_frame)
         
-        # Translation Status Indicator
         self.trans_status = QLabel("Ready")
         self.trans_status.setStyleSheet("font-size: 14px; color: #888; padding: 8px; background: #1e1e2e; border-radius: 5px; border-left: 3px solid #555;")
         layout.addWidget(self.trans_status)
@@ -615,7 +630,6 @@ class UnifiedApp(QMainWindow):
         self.final_display.setText(text)
         if self.check_voice.isChecked():
             self.tts_worker.speak(text)
-        self.trans_input.setText(text) 
 
     def manual_enter(self):
         if self.camera_worker:
@@ -637,35 +651,34 @@ class UnifiedApp(QMainWindow):
 
     def _generate_video_thread(self, text):
         try:
-            # Update status: Sending to Ollama
             self.trans_status.setText("🤖 Sending to Ollama AI...")
             self.trans_status.setStyleSheet("font-size: 14px; color: #74c0fc; padding: 8px; background: #1e1e2e; border-radius: 5px; border-left: 3px solid #74c0fc;")
             
-            loader = self.get_loader()
-            gloss_list = logic.translate_to_gloss(text)
-            
-            # Aggressive cleaning: Remove ALL punctuation and split into single words
+            gloss_list = []
+            # ✅ SAFEGUARD - FIX #1: Check if logic module was imported
+            if LOGIC_AVAILABLE:
+                gloss_list = logic.translate_to_gloss(text)
+            else:
+                # Fallback: simple uppercase
+                gloss_list = text.upper().split()
+
             import re
             gloss_text = " ".join(gloss_list)
-            # Remove all punctuation characters
             gloss_text = re.sub(r'[^\w\s]', ' ', gloss_text)
-            # Split and filter empty strings
             gloss_words = [w.strip().upper() for w in gloss_text.split() if w.strip()]
             
             print(f"📝 AI Gloss: {gloss_words}")
             
-            # Build video sequence - use available words to approximate meaning
+            loader = self.get_loader()
             final_words = []
             video_paths = []
             for word in gloss_words:
-                # Search in lowercase
                 video = loader.get_video(word.lower())
                 if video:
                     final_words.append(word)
                     video_paths.append(video)
                     print(f"✓ Found video for: {word}")
                 else:
-                    # Try to find similar word
                     print(f"✗ No video for: {word}, searching for similar...")
                     similar = loader.find_similar_words(word.lower(), limit=1)
                     if similar:
@@ -674,26 +687,21 @@ class UnifiedApp(QMainWindow):
                         if video:
                             final_words.append(f"{similar_word.upper()}*")
                             video_paths.append(video)
-                            print(f"  ↪ Using similar word: {similar_word}")
                         else:
                             print(f"  ✗ Similar word '{similar_word}' has no video")
                     else:
                         print(f"  ✗ No similar words found")
             
-            # Display the complete AI gloss (what it SHOULD be)
             self.gloss_label.setText(f"Gloss: {' '.join(gloss_words)}\nFound: {', '.join(final_words) if final_words else 'None'}")
             
-            # Update status: Processing videos
             self.trans_status.setText("🎬 Generating sign language video...")
             self.trans_status.setStyleSheet("font-size: 14px; color: #a78bfa; padding: 8px; background: #1e1e2e; border-radius: 5px; border-left: 3px solid #a78bfa;")
             
-            # Generate video using only available words
             if video_paths:
                 video_path = None
                 if len(video_paths) == 1:
                     video_path = video_paths[0]
                 else:
-                    # Use app's own video stitching with found paths
                     video_path = self.stitch_videos(video_paths, final_words)
                 
                 if video_path and os.path.exists(video_path):
@@ -724,7 +732,6 @@ class UnifiedApp(QMainWindow):
             elif key == Qt.Key.Key_Space: self.camera_worker.manual_add_space()
             elif key == Qt.Key.Key_Return: self.camera_worker.finalize_sentence()
             
-            # Suggestion Hotkeys
             elif key == Qt.Key.Key_F1: self.use_suggestion(0)
             elif key == Qt.Key.Key_F2: self.use_suggestion(1)
             elif key == Qt.Key.Key_F3: self.use_suggestion(2)

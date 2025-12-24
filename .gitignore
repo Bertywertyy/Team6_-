@@ -1,0 +1,20 @@
+# Large model files
+*.onnx
+
+# Dataset folders with videos
+dataset/
+custom/
+
+# Output folder
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files
+tempCodeRunnerFile.py
+tempCodeRunnerFile.python
+
+# VS Code
+.vscode/

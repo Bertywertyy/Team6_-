@@ -1,13 +1,42 @@
 import cv2 as cv
 import mediapipe as mp
 import os
+import sys
 import numpy as np
 import insightface
 from insightface.app import FaceAnalysis
+import tensorflow as tf
+
+# ================= ADD CUDA LIBRARIES TO PATH =================
+try:
+    import nvidia
+    nvidia_base = nvidia.__path__[0]
+    cudnn_bin = os.path.join(nvidia_base, 'cudnn', 'bin')
+    cublas_bin = os.path.join(nvidia_base, 'cublas', 'bin')
+    
+    if os.path.exists(cudnn_bin):
+        os.add_dll_directory(cudnn_bin)
+        print(f"✅ Added cuDNN to PATH: {cudnn_bin}")
+    if os.path.exists(cublas_bin):
+        os.add_dll_directory(cublas_bin)
+        print(f"✅ Added cuBLAS to PATH: {cublas_bin}")
+except Exception as e:
+    print(f"⚠️ Could not load CUDA libraries: {e}")
+
+# ================= GPU CHECK =================
+print("=" * 60)
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    print(f"✅ USING GPU: {gpus[0].name}")
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+else:
+    print("❌ USING CPU")
+print("=" * 60)
 
 # ================= CONFIGURATION =================
-INPUT_FOLDER = "./dataset/test_wlasl"
-OUTPUT_FOLDER = "./dataset/custom"
+INPUT_FOLDER = "./dataset/wlasl"  # Now pointing to the main folder containing a-z subfolders
+OUTPUT_FOLDER = "./dataset/custom" # Will replicate the a-z structure here
 ASSET_HEAD_FOLDER = "./assets/my_photos" 
 HAT_PNG_PATH = "./assets/hat.png" 
 MODEL_PATH = "./avatars/inswapper_128.onnx"
@@ -19,21 +48,18 @@ TARGET_HEIGHT = 1080
 # HAT SETTING
 HAT_LIFT_MULTIPLIER = 1.1 
 
-# FACE POSITION: Reduced from 0.04 to 0.015 to LIFT the face up slightly
-FACE_PUSH_DOWN_AMOUNT = 0.015 
-
+# FACE POSITION
+FACE_PUSH_DOWN_AMOUNT = 0.05
 # =================================================
-
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 class IronManLiveAvatar:
     def __init__(self):
-        print("🚀 Initializing Stark Industries Systems (V13 - Lifted Face)...")
+        print("🚀 Initializing Stark Industries Systems (V15 - Recursive Batching)...")
         self.mp_holistic = mp.solutions.holistic
         
         print("   - Loading AI Models...")
         self.app = FaceAnalysis(name='buffalo_l')
-        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        self.app.prepare(ctx_id=-1, det_size=(640, 640))  # -1 = CPU
         
         if os.path.exists(MODEL_PATH):
             self.swapper = insightface.model_zoo.get_model(MODEL_PATH, download=False, download_zip=False)
@@ -128,7 +154,7 @@ class IronManLiveAvatar:
         cx = int(chin.x * w)
         cy = int(chin.y * h)
         
-        # Apply Push Down (Reduced amount to lift face)
+        # Apply Push Down
         cy += int(h * FACE_PUSH_DOWN_AMOUNT) 
         
         neck_w = int(width_px * 0.45) 
@@ -281,7 +307,6 @@ class IronManLiveAvatar:
         except: return
         x = int(center_pt.x * w)
         y = int(center_pt.y * h)
-        
         # Apply Push Down
         y += int(h * FACE_PUSH_DOWN_AMOUNT)
         y_offset = int(new_h * HAT_LIFT_MULTIPLIER) 
@@ -307,10 +332,8 @@ class IronManLiveAvatar:
         h_h, w_h = head_img.shape[:2]
         x = int(center_pt.x * w)
         y = int(center_pt.y * h)
-        
         # PUSH FACE LOWER
         y += int(h * FACE_PUSH_DOWN_AMOUNT) 
-        
         x1 = x - w_h // 2
         y1 = y - h_h // 2
         x2 = x1 + w_h
@@ -327,34 +350,48 @@ class IronManLiveAvatar:
             canvas[y1_c:y2_c, x1_c:x2_c, c] = (alpha * crop[:, :, c] + inv_alpha * canvas[y1_c:y2_c, x1_c:x2_c, c])
 
     def draw_hands_armored(self, canvas, landmarks, base_color, joint_color):
-        """ Draws thick armored segments and joints instead of stick figures """
         lm = landmarks.landmark
         h, w = canvas.shape[:2]
-        
         thumb = [1, 2, 3, 4]
         index = [5, 6, 7, 8]
         middle = [9, 10, 11, 12]
         ring = [13, 14, 15, 16]
         pinky = [17, 18, 19, 20]
         palm = [0, 1, 5, 9, 13, 17, 0]
+        base_thickness = 12
 
-        thickness = 8
+        def draw_segment_plate(idx1, idx2, thick_start, thick_end):
+            x1, y1 = int(lm[idx1].x * w), int(lm[idx1].y * h)
+            x2, y2 = int(lm[idx2].x * w), int(lm[idx2].y * h)
+            if x1==0 or x2==0: return
+            dx, dy = x2-x1, y2-y1
+            L = np.sqrt(dx**2 + dy**2)
+            if L < 5: return 
+            nx, ny = -dy/L, dx/L
+            pts = np.array([
+                [x1 + nx*thick_start*0.5, y1 + ny*thick_start*0.5],
+                [x2 + nx*thick_end*0.5, y2 + ny*thick_end*0.5], 
+                [x2 - nx*thick_end*0.5, y2 - ny*thick_end*0.5], 
+                [x1 - nx*thick_start*0.5, y1 - ny*thick_start*0.5]
+            ], dtype=np.int32)
+            cv.fillConvexPoly(canvas, pts, base_color)
+            cv.polylines(canvas, [pts], True, (int(base_color[0]*0.8), int(base_color[1]*0.8), 255), 1, cv.LINE_AA)
+
         for finger in [thumb, index, middle, ring, pinky]:
             for i in range(len(finger) - 1):
-                p1 = (int(lm[finger[i]].x * w), int(lm[finger[i]].y * h))
-                p2 = (int(lm[finger[i+1]].x * w), int(lm[finger[i+1]].y * h))
-                cv.line(canvas, p1, p2, base_color, thickness)
-        
-        for i in range(len(palm) - 1):
-             p1 = (int(lm[palm[i]].x * w), int(lm[palm[i]].y * h))
-             p2 = (int(lm[palm[i+1]].x * w), int(lm[palm[i+1]].y * h))
-             cv.line(canvas, p1, p2, base_color, thickness+2)
+                t_start = base_thickness * (1.0 - (i * 0.15))
+                t_end = base_thickness * (1.0 - ((i+1) * 0.15))
+                draw_segment_plate(finger[i], finger[i+1], t_start, t_end)
 
-        joint_radius = 6
+        for i in range(len(palm) - 1):
+             draw_segment_plate(palm[i], palm[i+1], base_thickness+2, base_thickness+2)
+
+        joint_radius = 7
         for i in range(21):
             cx, cy = int(lm[i].x * w), int(lm[i].y * h)
-            cv.circle(canvas, (cx, cy), joint_radius, joint_color, -1)
             cv.circle(canvas, (cx, cy), joint_radius, (80, 210, 255), 1)
+            cv.circle(canvas, (cx, cy), joint_radius-1, joint_color, -1)
+            cv.circle(canvas, (cx, cy), joint_radius-3, (int(joint_color[0]*1.2), int(joint_color[1]*1.2), 255), -1)
 
     def process_video(self, input_path, output_path):
         cap = cv.VideoCapture(input_path)
@@ -371,8 +408,8 @@ class IronManLiveAvatar:
                 results = holistic.process(cv.cvtColor(canvas, cv.COLOR_BGR2RGB)) 
                 
                 final_comp = np.full((TARGET_HEIGHT, TARGET_WIDTH, 3), (15, 15, 15), dtype=np.uint8)
-                for x in range(0, TARGET_WIDTH, 60): cv.line(final_comp, (x, 0), (x, TARGET_HEIGHT), (30, 30, 30), 1)
-                for y in range(0, TARGET_HEIGHT, 60): cv.line(final_comp, (0, y), (TARGET_WIDTH, y), (30, 30, 30), 1)
+                for x in range(0, TARGET_WIDTH, 60): cv.line(final_comp, (x, 0), (x, TARGET_HEIGHT), (25, 25, 25), 1)
+                for y in range(0, TARGET_HEIGHT, 60): cv.line(final_comp, (0, y), (TARGET_WIDTH, y), (25, 25, 25), 1)
 
                 nose_anchor = results.pose_landmarks.landmark[0] if results.pose_landmarks else None
                 def do_zoom(lms):
@@ -401,7 +438,6 @@ class IronManLiveAvatar:
                             target_width = int(shoulder_width * HEAD_SIZE_MULTIPLIER)
                             scale = target_width / head_img.shape[1]
                             head_img = cv.resize(head_img, (0,0), fx=scale, fy=scale)
-                            
                             self.overlay_head(final_comp, head_img, lm[0], TARGET_WIDTH, TARGET_HEIGHT)
                             self.overlay_hat(final_comp, lm[0], target_width, TARGET_WIDTH, TARGET_HEIGHT)
 
@@ -412,25 +448,46 @@ class IronManLiveAvatar:
                     wrist = results.left_hand_landmarks.landmark[0]
                     idx = results.left_hand_landmarks.landmark[5]
                     self.draw_hands_armored(final_comp, results.left_hand_landmarks, C_RED_LITE, C_GOLD_LITE)
-                    self.draw_glow_circle(final_comp, (int((wrist.x+idx.x)/2*TARGET_WIDTH), int((wrist.y+idx.y)/2*TARGET_HEIGHT)), 12, (255, 200, 0), 3)
+                    self.draw_glow_circle(final_comp, (int((wrist.x+idx.x)/2*TARGET_WIDTH), int((wrist.y+idx.y)/2*TARGET_HEIGHT)), 12, (255, 200, 50), 3)
 
                 if results.right_hand_landmarks:
                     wrist = results.right_hand_landmarks.landmark[0]
                     idx = results.right_hand_landmarks.landmark[5]
                     self.draw_hands_armored(final_comp, results.right_hand_landmarks, C_RED_LITE, C_GOLD_LITE)
-                    self.draw_glow_circle(final_comp, (int((wrist.x+idx.x)/2*TARGET_WIDTH), int((wrist.y+idx.y)/2*TARGET_HEIGHT)), 12, (255, 200, 0), 3)
+                    self.draw_glow_circle(final_comp, (int((wrist.x+idx.x)/2*TARGET_WIDTH), int((wrist.y+idx.y)/2*TARGET_HEIGHT)), 12, (255, 200, 50), 3)
 
                 out.write(final_comp)
         cap.release()
         out.release()
         print(f"✅ Rendered: {output_path}")
 
+    # --- RECURSIVE BATCH ---
     def run_batch(self):
-        files = [f for f in os.listdir(INPUT_FOLDER) if f.endswith(".mp4")]
-        print(f"🚀 Processing {len(files)} videos...")
-        for i, f in enumerate(files):
-            print(f"[{i+1}/{len(files)}] {f}...")
-            self.process_video(os.path.join(INPUT_FOLDER, f), os.path.join(OUTPUT_FOLDER, f))
+        # 1. Walk through the directory tree
+        print(f"🚀 Scanning {INPUT_FOLDER} for videos...")
+        video_files = []
+        for root, dirs, files in os.walk(INPUT_FOLDER):
+            for file in files:
+                if file.lower().endswith(".mp4"):
+                    full_path = os.path.join(root, file)
+                    video_files.append(full_path)
+        
+        if not video_files:
+            print("❌ No videos found in subdirectories!")
+            return
+
+        print(f"🚀 Found {len(video_files)} videos. Processing...")
+        
+        for i, input_path in enumerate(video_files):
+            # 2. Replicate directory structure in output
+            relative_path = os.path.relpath(input_path, INPUT_FOLDER)
+            output_path = os.path.join(OUTPUT_FOLDER, relative_path)
+            
+            # Create subfolder if needed
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            print(f"[{i+1}/{len(video_files)}] {relative_path}...")
+            self.process_video(input_path, output_path)
 
 if __name__ == "__main__":
     bot = IronManLiveAvatar()
